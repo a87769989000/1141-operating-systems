@@ -1,0 +1,223 @@
+From 63daa5c834560084f2faae8d7b8ee619bd7f4434 Mon Sep 17 00:00:00 2001
+From: A141064 <a141064@nycu.edu.tw>
+Date: Sun, 23 Nov 2025 07:17:26 +0000
+Subject: [PATCH] HW1 Implementation for a141064
+
+---
+ include/linux/syscalls.h          |  3 ++
+ include/uapi/asm-generic/unistd.h | 17 +++++-
+ kernel/Makefile                   |  3 +-
+ kernel/sys_revstr.c               | 42 +++++++++++++++
+ kernel/sys_tempbuf.c              | 89 +++++++++++++++++++++++++++++++
+ 5 files changed, 151 insertions(+), 3 deletions(-)
+ create mode 100644 kernel/sys_revstr.c
+ create mode 100644 kernel/sys_tempbuf.c
+
+diff --git a/include/linux/syscalls.h b/include/linux/syscalls.h
+index a34b0f9a9..aef0ea841 100644
+--- a/include/linux/syscalls.h
++++ b/include/linux/syscalls.h
+@@ -1385,4 +1385,7 @@ int __sys_getsockopt(int fd, int level, int optname, char __user *optval,
+ 		int __user *optlen);
+ int __sys_setsockopt(int fd, int level, int optname, char __user *optval,
+ 		int optlen);
++asmlinkage long sys_revstr(char __user *str, size_t n);
++asmlinkage long sys_tempbuf(int mode, void __user *data, size_t size);
++
+ #endif
+diff --git a/include/uapi/asm-generic/unistd.h b/include/uapi/asm-generic/unistd.h
+index 45fa180cc..e6d447b47 100644
+--- a/include/uapi/asm-generic/unistd.h
++++ b/include/uapi/asm-generic/unistd.h
+@@ -43,6 +43,14 @@ __SYSCALL(__NR_io_cancel, sys_io_cancel)
+ __SC_3264(__NR_io_getevents, sys_io_getevents_time32, sys_io_getevents)
+ #endif
+ 
++#define __NR_revstr 451
++__SYSCALL(__NR_revstr, sys_revstr)
++#define __NR_tempbuf 452
++__SYSCALL(__NR_tempbuf, sys_tempbuf)
++
++#undef __NR_syscalls
++#define __NR_syscalls 453x
++
+ /* fs/xattr.c */
+ #define __NR_setxattr 5
+ __SYSCALL(__NR_setxattr, sys_setxattr)
+@@ -886,9 +894,14 @@ __SYSCALL(__NR_futex_waitv, sys_futex_waitv)
+ #define __NR_set_mempolicy_home_node 450
+ __SYSCALL(__NR_set_mempolicy_home_node, sys_set_mempolicy_home_node)
+ 
+-#undef __NR_syscalls
+-#define __NR_syscalls 451
+ 
++#define __NR_revstr 451
++__SYSCALL(__NR_revstr, sys_revstr)
++#define __NR_tempbuf 452
++__SYSCALL(__NR_tempbuf, sys_tempbuf)
++
++#undef __NR_syscalls
++#define __NR_syscalls 453
+ /*
+  * 32 bit systems traditionally used different
+  * syscalls for off_t and loff_t arguments, while
+diff --git a/kernel/Makefile b/kernel/Makefile
+index d754e0be1..23687efce 100644
+--- a/kernel/Makefile
++++ b/kernel/Makefile
+@@ -10,7 +10,8 @@ obj-y     = fork.o exec_domain.o panic.o \
+ 	    extable.o params.o \
+ 	    kthread.o sys_ni.o nsproxy.o \
+ 	    notifier.o ksysfs.o cred.o reboot.o \
+-	    async.o range.o smpboot.o ucount.o regset.o
++	    async.o range.o smpboot.o ucount.o regset.o \
++            sys_revstr.o sys_tempbuf.o
+ 
+ obj-$(CONFIG_USERMODE_DRIVER) += usermode_driver.o
+ obj-$(CONFIG_MODULES) += kmod.o
+diff --git a/kernel/sys_revstr.c b/kernel/sys_revstr.c
+new file mode 100644
+index 000000000..d8634de73
+--- /dev/null
++++ b/kernel/sys_revstr.c
+@@ -0,0 +1,42 @@
++#include <linux/kernel.h>
++#include <linux/syscalls.h>
++#include <linux/uaccess.h>
++#include <linux/slab.h>
++#include <linux/string.h>
++
++/* Syscall 1: sys_revstr (ID: 451) */
++SYSCALL_DEFINE2(revstr, char __user *, str, size_t, n)
++{
++    char *kbuf;
++    int i;
++    char temp;
++
++    if (!str || n == 0) return -EINVAL;
++
++    kbuf = kmalloc(n + 1, GFP_KERNEL);
++    if (!kbuf) return -ENOMEM;
++
++    if (copy_from_user(kbuf, str, n)) {
++        kfree(kbuf);
++        return -EFAULT;
++    }
++    kbuf[n] = '\0';
++
++    printk(KERN_INFO "The origin string: %s\n", kbuf);
++
++    for (i = 0; i < n / 2; i++) {
++        temp = kbuf[i];
++        kbuf[i] = kbuf[n - 1 - i];
++        kbuf[n - 1 - i] = temp;
++    }
++
++    printk(KERN_INFO "The reversed string: %s\n", kbuf);
++
++    if (copy_to_user(str, kbuf, n)) {
++        kfree(kbuf);
++        return -EFAULT;
++    }
++
++    kfree(kbuf);
++    return 0;
++}
+diff --git a/kernel/sys_tempbuf.c b/kernel/sys_tempbuf.c
+new file mode 100644
+index 000000000..7132301c8
+--- /dev/null
++++ b/kernel/sys_tempbuf.c
+@@ -0,0 +1,89 @@
++#include <linux/kernel.h>
++#include <linux/syscalls.h>
++#include <linux/uaccess.h>
++#include <linux/slab.h>
++#include <linux/string.h>
++#include <linux/list.h>
++#include <linux/mutex.h>
++
++/* Syscall 2: sys_tempbuf (ID: 452) */
++
++struct temp_node {
++    char *data;
++    struct list_head list;
++};
++
++static LIST_HEAD(temp_list);
++static DEFINE_MUTEX(temp_lock);
++
++enum mode { PRINT = 0, ADD = 1, REMOVE = 2 };
++
++SYSCALL_DEFINE3(tempbuf, int, mode, void __user *, data, size_t, size)
++{
++    struct temp_node *entry, *tmp;
++    char *kbuf, *out_buf;
++    int ret = 0;
++
++    if (mode != PRINT && (!data || size == 0)) return -EFAULT;
++
++    mutex_lock(&temp_lock);
++
++    if (mode == ADD) {
++        entry = kmalloc(sizeof(struct temp_node), GFP_KERNEL);
++        if (!entry) { mutex_unlock(&temp_lock); return -ENOMEM; }
++
++        entry->data = kmalloc(size + 1, GFP_KERNEL);
++        if (!entry->data) { kfree(entry); mutex_unlock(&temp_lock); return -ENOMEM; }
++
++        if (copy_from_user(entry->data, data, size)) {
++            kfree(entry->data); kfree(entry); mutex_unlock(&temp_lock); return -EFAULT;
++        }
++        entry->data[size] = '\0';
++
++        list_add_tail(&entry->list, &temp_list);
++        printk(KERN_INFO "[tempbuf] Added: %s\n", entry->data);
++        ret = 0;
++
++    } else if (mode == REMOVE) {
++        kbuf = kmalloc(size + 1, GFP_KERNEL);
++        if (!kbuf) { mutex_unlock(&temp_lock); return -ENOMEM; }
++
++        if (copy_from_user(kbuf, data, size)) { kfree(kbuf); mutex_unlock(&temp_lock); return -EFAULT; }
++        kbuf[size] = '\0';
++
++        ret = -ENOENT;
++        list_for_each_entry_safe(entry, tmp, &temp_list, list) {
++            if (strcmp(entry->data, kbuf) == 0) {
++                printk(KERN_INFO "[tempbuf] Removed: %s\n", entry->data);
++                list_del(&entry->list);
++                kfree(entry->data); kfree(entry);
++                ret = 0;
++                break;
++            }
++        }
++        kfree(kbuf);
++
++    } else if (mode == PRINT) {
++        out_buf = kzalloc(512, GFP_KERNEL);
++        if (!out_buf) { mutex_unlock(&temp_lock); return -ENOMEM; }
++
++        bool first = true;
++        list_for_each_entry(entry, &temp_list, list) {
++            if (!first) strlcat(out_buf, " ", 512);
++            strlcat(out_buf, entry->data, 512);
++            first = false;
++        }
++        printk(KERN_INFO "[tempbuf] %s\n", out_buf);
++
++        int actual_len = strlen(out_buf);
++        if (size < actual_len) actual_len = size;
++
++        if (copy_to_user(data, out_buf, actual_len)) { kfree(out_buf); mutex_unlock(&temp_lock); return -EFAULT; }
++        ret = actual_len;
++        kfree(out_buf);
++    } else {
++        ret = -EINVAL;
++    }
++    mutex_unlock(&temp_lock);
++    return ret;
++}
+-- 
+2.43.0
+
